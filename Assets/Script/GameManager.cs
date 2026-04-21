@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.UI;
 using TMPro;
 
 public class GameManager : MonoBehaviour
@@ -32,7 +33,15 @@ public class GameManager : MonoBehaviour
     public GameObject gameWinPanel;
     public GameObject textPrefab;
 
+    [Header("Level-Up Panel Buttons")]
+    [Tooltip("Drag the two existing choice buttons here — slot 0 is the one wired to ChooseHealth, slot 1 is the one wired to ChooseMight.")]
+    public Button[] upgradeButtons = new Button[2];
+
+    [Header("Max-Level Fallback")]
+    [Range(0f, 1f)] public float healPercentWhenAllMaxed = 0.1f;
+
     private readonly Stack<string> upgradeHistory = new Stack<string>();
+    private readonly string[] slotAssignments = new string[2];
 
     public IReadOnlyCollection<string> UpgradeHistory => upgradeHistory;
 
@@ -95,19 +104,100 @@ public class GameManager : MonoBehaviour
         UpdateUI();
     }
 
-    public void ChooseHealth() => ApplyUpgrade("health");
-    public void ChooseMight() => ApplyUpgrade("might");
+    // Inspector button bindings: slot 0 => ChooseHealth, slot 1 => ChooseMight.
+    // Method names kept for scene compatibility; actual upgrade applied is whatever
+    // was rolled into that slot for this level-up.
+    public void ChooseHealth() => ResolveSlot(0);
+    public void ChooseMight() => ResolveSlot(1);
 
-    private void ApplyUpgrade(string id)
+    private void ResolveSlot(int index)
     {
-        UpgradeOption option = UpgradeRegistry.Get(id);
-        if (option != null && player != null)
+        if (index < 0 || index >= slotAssignments.Length)
         {
-            option.Apply(player);
-            upgradeHistory.Push(option.DisplayName);
+            ResumeGame();
+            return;
         }
+        string id = slotAssignments[index];
+        if (!string.IsNullOrEmpty(id)) ApplyUpgradeById(id);
         UpdateUI();
         ResumeGame();
+    }
+
+    private void ApplyUpgradeById(string id)
+    {
+        if (player == null) return;
+        PlayerUpgrades upgrades = player.GetComponent<PlayerUpgrades>();
+        if (upgrades == null) return;
+        if (upgrades.ApplyUpgrade(id))
+        {
+            UpgradeDefinition def = UpgradeCatalog.Get(id);
+            upgradeHistory.Push(def != null ? def.DisplayName : id);
+        }
+    }
+
+    void PauseForMenu()
+    {
+        PlayerUpgrades upgrades = player != null ? player.GetComponent<PlayerUpgrades>() : null;
+
+        if (upgrades == null)
+        {
+            // No upgrade system wired — fall back to just showing the panel.
+            Time.timeScale = 0f;
+            if (levelUpPanel != null) levelUpPanel.SetActive(true);
+            Cursor.visible = true;
+            return;
+        }
+
+        int slots = upgradeButtons != null ? upgradeButtons.Length : 0;
+        List<UpgradeDefinition> picks = upgrades.PickRandom(slots);
+
+        if (picks.Count == 0)
+        {
+            ApplyMaxLevelHeal();
+            return;
+        }
+
+        AssignSlots(picks, upgrades);
+        Time.timeScale = 0f;
+        if (levelUpPanel != null) levelUpPanel.SetActive(true);
+        Cursor.visible = true;
+    }
+
+    private void AssignSlots(List<UpgradeDefinition> picks, PlayerUpgrades upgrades)
+    {
+        for (int i = 0; i < upgradeButtons.Length; i++)
+        {
+            Button btn = upgradeButtons[i];
+            if (btn == null) continue;
+
+            if (i < picks.Count)
+            {
+                UpgradeDefinition def = picks[i];
+                slotAssignments[i] = def.Id;
+                btn.gameObject.SetActive(true);
+                btn.interactable = true;
+                TextMeshProUGUI txt = btn.GetComponentInChildren<TextMeshProUGUI>();
+                if (txt != null)
+                {
+                    txt.text = def.DescribeNext(upgrades.GetLevel(def.Id));
+                }
+            }
+            else
+            {
+                slotAssignments[i] = null;
+                btn.gameObject.SetActive(false);
+            }
+        }
+    }
+
+    private void ApplyMaxLevelHeal()
+    {
+        if (player == null) return;
+        float heal = player.maxHp * healPercentWhenAllMaxed;
+        player.currentHp = Mathf.Min(player.maxHp, player.currentHp + heal);
+        ShowText($"+{Mathf.RoundToInt(heal)} HP (Maxed)", Color.green);
+        UpdateUI();
+        // Skip the panel entirely so the run keeps flowing.
     }
 
     public void TriggerGameOver()
@@ -139,16 +229,9 @@ public class GameManager : MonoBehaviour
             $"Upgrades: {history}";
     }
 
-    void PauseForMenu()
-    {
-        Time.timeScale = 0f;
-        levelUpPanel.SetActive(true);
-        Cursor.visible = true;
-    }
-
     void ResumeGame()
     {
-        levelUpPanel.SetActive(false);
+        if (levelUpPanel != null) levelUpPanel.SetActive(false);
         Time.timeScale = 1f;
     }
 
