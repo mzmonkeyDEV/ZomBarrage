@@ -1,10 +1,16 @@
 using System.Collections;
-using Unity.VisualScripting.Antlr3.Runtime.Misc;
+using System.Collections.Generic;
 using UnityEngine;
-using static UnityEngine.Rendering.DebugUI;
 
 public class PlayerAttack : Entity
 {
+    public enum TargetingMode
+    {
+        Nearest,
+        LowestHP,
+        HighestHP
+    }
+
     [Header("Attack Setup")]
     public GameObject projectilePrefab;
     [Tooltip("Create an empty GameObject as a child of the player, place it in front of the player, and drag it here.")]
@@ -12,103 +18,90 @@ public class PlayerAttack : Entity
 
     [Header("Targeting Settings")]
     public float attackRange = 10f;
+    public TargetingMode targetingMode = TargetingMode.Nearest;
 
-    // This is a public method so our UI Button can call it directly
+    [Header("Optional Weapon Data")]
+    [Tooltip("If set, overrides damage/range from this WeaponData at the given level index.")]
+    public WeaponData weaponData;
+    public int weaponLevelIndex = 0;
+
     [Header("Invincibility Settings")]
     public float invincibilityDuration = 1.5f;
-    public float flashInterval = 0.1f; // Speed of the flickering
+    public float flashInterval = 0.1f;
     private bool isInvincible = false;
     private bool isDead = false;
 
     [Header("UI Feedback")]
-    public GameObject damagePanel; // Drag your UI Panel here in the Inspector
+    public GameObject damagePanel;
     public float uiFlashDuration = 0.1f;
 
-
-    // Overriding TakeDamage to include invincibility logic
     public override void TakeDamage(float damage, Transform attacker)
     {
         if (isDead) return;
+
         Renderer rendi = GetComponentInChildren<Renderer>();
         Color originalColor = rendi.material.color;
-        // 1. If currently invincible, ignore all damage
+
         if (isInvincible) return;
 
-        // 2. Apply base damage and knockback from Entity script
         base.TakeDamage(damage, attacker);
         GameManager.Instance.UpdateUI();
 
-        // 3. Start the invincibility period
-        if (currentHp > 0) // Only if still alive
+        if (currentHp > 0)
         {
             StartCoroutine(InvincibilityRoutine(originalColor));
             StartCoroutine(TogglePanelRoutine());
         }
     }
+
     private IEnumerator TogglePanelRoutine()
     {
         damagePanel.SetActive(true);
-
-        // Wait for 0.1 seconds
         yield return new WaitForSeconds(0.1f);
-
         damagePanel.SetActive(false);
     }
+
     protected override void Die()
     {
         isDead = true;
         currentHp = 0;
         GameManager.Instance.UpdateUI();
-
-        // Tell the GameManager to show the Game Over screen
         GameManager.Instance.TriggerGameOver();
-
-        // Optional: Play death animation or disable player movement here
     }
 
     private IEnumerator InvincibilityRoutine(Color ori)
     {
         isInvincible = true;
-
         float elapsed = 0;
         Renderer rend = GetComponentInChildren<Renderer>();
-        
 
         while (elapsed < invincibilityDuration)
         {
-            // Toggle between White and Original Color
             rend.material.color = (rend.material.color == Color.white) ? ori : Color.white;
-
             yield return new WaitForSeconds(flashInterval);
             elapsed += flashInterval;
         }
 
-        // Ensure we reset to the original color at the end
         rend.material.color = ori;
         isInvincible = false;
     }
+
     public void FireAtNearestEnemy()
     {
-        Enemy target = GetNearestEnemy();
+        float effectiveRange = GetEffectiveRange();
+        Enemy target = SelectTarget(targetingMode, effectiveRange);
 
         if (target != null)
         {
-            // 1. Calculate direction to the enemy
             Vector3 directionToEnemy = target.transform.position - transform.position;
-
-            // 2. Ignore vertical difference so the player doesn't tilt up/down
             directionToEnemy.y = 0f;
-
-            // 3. Instantly snap the player to face the enemy
             transform.rotation = Quaternion.LookRotation(directionToEnemy);
 
-            // 4. Spawn the projectile at the fire point. 
-            // It uses firePoint.rotation, which is now facing the enemy!
             GameObject bullet = Instantiate(projectilePrefab, firePoint.position, firePoint.rotation);
             if (bullet.TryGetComponent(out Projectile p))
             {
-                p.damage = Mathf.RoundToInt(p.damage * mightMultiplier);
-                
+                float baseDamage = GetEffectiveDamage(p.damage);
+                p.damage = Mathf.RoundToInt(baseDamage * mightMultiplier);
             }
         }
         else
@@ -117,27 +110,63 @@ public class PlayerAttack : Entity
         }
     }
 
-    private Enemy GetNearestEnemy()
+    public float GetEffectiveRange()
     {
-        Enemy closestEnemy = null;
-        float shortestDistance = attackRange; // Start with max range
-
-        // Loop through our highly efficient static list
-        foreach (Enemy enemy in Enemy.ActiveEnemies)
-        {
-            float distanceToEnemy = Vector3.Distance(transform.position, enemy.transform.position);
-
-            if (distanceToEnemy < shortestDistance)
-            {
-                shortestDistance = distanceToEnemy;
-                closestEnemy = enemy;
-            }
-        }
-
-        return closestEnemy; // Returns null if no enemy is within attackRange
+        WeaponData.WeaponLevel? level = GetCurrentWeaponLevel();
+        if (level.HasValue && level.Value.range > 0f) return level.Value.range;
+        return attackRange;
     }
 
-    // Optional: Draw a circle in the editor so you can see your attack range
+    public float GetEffectiveDamage(float fallback)
+    {
+        WeaponData.WeaponLevel? level = GetCurrentWeaponLevel();
+        if (level.HasValue && level.Value.damage > 0f) return level.Value.damage;
+        return fallback;
+    }
+
+    private WeaponData.WeaponLevel? GetCurrentWeaponLevel()
+    {
+        if (weaponData == null || weaponData.levels == null || weaponData.levels.Count == 0) return null;
+        int idx = Mathf.Clamp(weaponLevelIndex, 0, weaponData.levels.Count - 1);
+        return weaponData.levels[idx];
+    }
+
+    public Enemy SelectTarget(TargetingMode mode, float range)
+    {
+        if (Enemy.ActiveEnemies.Count == 0) return null;
+
+        List<Enemy> candidates = new List<Enemy>();
+        Vector3 myPos = transform.position;
+
+        for (int i = 0; i < Enemy.ActiveEnemies.Count; i++)
+        {
+            Enemy e = Enemy.ActiveEnemies[i];
+            if (e == null) continue;
+            if (Vector3.Distance(myPos, e.transform.position) <= range)
+            {
+                candidates.Add(e);
+            }
+        }
+        if (candidates.Count == 0) return null;
+
+        switch (mode)
+        {
+            case TargetingMode.Nearest:
+                candidates.Sort((a, b) =>
+                    Vector3.SqrMagnitude(a.transform.position - myPos)
+                        .CompareTo(Vector3.SqrMagnitude(b.transform.position - myPos)));
+                break;
+            case TargetingMode.LowestHP:
+                candidates.Sort((a, b) => a.currentHp.CompareTo(b.currentHp));
+                break;
+            case TargetingMode.HighestHP:
+                candidates.Sort((a, b) => b.currentHp.CompareTo(a.currentHp));
+                break;
+        }
+
+        return candidates[0];
+    }
+
     private void OnDrawGizmosSelected()
     {
         Gizmos.color = Color.red;

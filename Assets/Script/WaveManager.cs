@@ -1,11 +1,14 @@
-using UnityEngine;
-using TMPro; // Required for UI
 using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using TMPro;
 
 public class WaveManager : MonoBehaviour
 {
+    public static WaveManager Instance { get; private set; }
+
     [Header("UI Reference")]
-    public TextMeshProUGUI waveText; // Drag Wave_Text here
+    public TextMeshProUGUI waveText;
 
     [Header("Wave Settings")]
     public GameObject enemyPrefab;
@@ -17,33 +20,61 @@ public class WaveManager : MonoBehaviour
     private int maxWaves = 5;
     private bool allWavesSpawned = false;
 
+    private readonly Queue<int> waveSpawnPlan = new Queue<int>();
+
+    public int CurrentWave => currentWave;
+    public int MaxWaves => maxWaves;
+
+    void Awake()
+    {
+        Instance = this;
+        BuildWavePlan();
+    }
+
     void Start()
     {
-        UpdateWaveUI(); // Initial text
+        UpdateWaveUI();
         StartCoroutine(WaveRoutine());
+    }
+
+    private void BuildWavePlan()
+    {
+        waveSpawnPlan.Clear();
+        for (int w = 1; w <= maxWaves; w++)
+        {
+            waveSpawnPlan.Enqueue(baseEnemyCount + (w * 2));
+        }
     }
 
     IEnumerator WaveRoutine()
     {
-        while (currentWave < maxWaves)
+        while (waveSpawnPlan.Count > 0)
         {
             currentWave++;
-            UpdateWaveUI(); // Update text when wave starts
+            UpdateWaveUI();
 
-            int enemiesToSpawn = baseEnemyCount + (currentWave * 2);
+            int enemiesToSpawn = waveSpawnPlan.Dequeue();
 
+            Queue<Transform> perWaveSpawnQueue = new Queue<Transform>();
             for (int i = 0; i < enemiesToSpawn; i++)
             {
-                SpawnEnemy();
+                perWaveSpawnQueue.Enqueue(PickSpawnPoint());
+            }
+
+            while (perWaveSpawnQueue.Count > 0)
+            {
+                SpawnEnemy(perWaveSpawnQueue.Dequeue());
                 yield return new WaitForSeconds(0.5f);
             }
 
-            // Wait 10 seconds before starting the next wave
             yield return new WaitForSeconds(timeBetweenWaves);
         }
 
         allWavesSpawned = true;
-        waveText.text = "Final Wave: Clear remaining enemies!";
+        if (waveText != null)
+        {
+            waveText.text = "Final Wave: Clear remaining enemies!";
+        }
     }
 
     void UpdateWaveUI()
@@ -54,11 +85,17 @@ public class WaveManager : MonoBehaviour
         }
     }
 
-    void SpawnEnemy()
+    Transform PickSpawnPoint()
     {
-        int randomIndex = Random.Range(0, spawnPoints.Length);
-        Instantiate(enemyPrefab, spawnPoints[randomIndex].position, Quaternion.identity);
-        // Note: The Enemy script now handles adding itself to the list in Awake()
+        if (spawnPoints == null || spawnPoints.Length == 0) return transform;
+        int idx = Random.Range(0, spawnPoints.Length);
+        return spawnPoints[idx];
+    }
+
+    void SpawnEnemy(Transform point)
+    {
+        if (enemyPrefab == null || point == null) return;
+        Instantiate(enemyPrefab, point.position, Quaternion.identity);
     }
 
     void Update()
