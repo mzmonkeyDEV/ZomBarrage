@@ -1,5 +1,6 @@
+using System.Collections.Generic;
 using UnityEngine;
-using TMPro; // Don't forget this!
+using TMPro;
 
 public class GameManager : MonoBehaviour
 {
@@ -10,10 +11,19 @@ public class GameManager : MonoBehaviour
     public int xpToLevelUp = 100;
     public int currentLevel = 1;
 
+    [Header("XP Scaling")]
+    [SerializeField] private float xpScaleFactor = 1.5f;
+
+    private int capturedBaseXP = 100;
+
     [Header("UI Text References")]
     [SerializeField] private TextMeshProUGUI hpText;
     [SerializeField] private TextMeshProUGUI xpText;
     [SerializeField] private TextMeshProUGUI mightText;
+
+    [Header("Optional End-Game Score UI")]
+    [SerializeField] private TextMeshProUGUI gameOverScoreText;
+    [SerializeField] private TextMeshProUGUI gameWinScoreText;
 
     [Header("References")]
     public PlayerAttack player;
@@ -22,31 +32,41 @@ public class GameManager : MonoBehaviour
     public GameObject gameWinPanel;
     public GameObject textPrefab;
 
+    private readonly Stack<string> upgradeHistory = new Stack<string>();
+
+    public IReadOnlyCollection<string> UpgradeHistory => upgradeHistory;
+
     void Awake()
     {
         if (Instance == null) Instance = this;
+        capturedBaseXP = xpToLevelUp;
     }
 
     void Start()
     {
-        UpdateUI(); // Set initial text
+        UpdateUI();
     }
 
-    // Call this whenever HP or XP changes
+    private static int ComputeXPThreshold(int level, int baseXP, float factor)
+    {
+        if (level <= 1) return baseXP;
+        return Mathf.RoundToInt(ComputeXPThreshold(level - 1, baseXP, factor) * factor);
+    }
+
     public void UpdateUI()
     {
-        // Format: HP: 10 / 10
-        if (player != null)
+        if (player != null && hpText != null)
         {
             hpText.text = $"HP: {Mathf.RoundToInt(player.currentHp)} / {Mathf.RoundToInt(player.maxHp)}";
         }
 
-        // Format: LVL 1 - 10 / 100 XP
-        xpText.text = $"LVL {currentLevel} - {currentXP} / {xpToLevelUp} XP";
-
-        if (mightText != null)
+        if (xpText != null)
         {
-            // Displays as "Might: 1.2x"
+            xpText.text = $"LVL {currentLevel} - {currentXP} / {xpToLevelUp} XP";
+        }
+
+        if (mightText != null && player != null)
+        {
             mightText.text = "Damage: " + player.mightMultiplier.ToString("F1") + "x";
         }
     }
@@ -61,61 +81,88 @@ public class GameManager : MonoBehaviour
             LevelUp();
         }
 
-        UpdateUI(); // Refresh UI after getting XP
+        UpdateUI();
     }
 
     void LevelUp()
     {
         currentXP -= xpToLevelUp;
-        xpToLevelUp = Mathf.RoundToInt(xpToLevelUp * 1.5f); // Scaling gets harder
         currentLevel++;
+        xpToLevelUp = ComputeXPThreshold(currentLevel, capturedBaseXP, xpScaleFactor);
 
         ShowText("LEVEL UP!", Color.cyan);
         Invoke("PauseForMenu", 0.5f);
         UpdateUI();
     }
 
-    // --- Button Functions Updated to Refresh UI ---
+    public void ChooseHealth() => ApplyUpgrade("health");
+    public void ChooseMight() => ApplyUpgrade("might");
 
-    public void ChooseHealth()
+    private void ApplyUpgrade(string id)
     {
-        player.maxHp += 20;
-        player.currentHp += 20; // Heal on upgrade
-        UpdateUI();
-        ResumeGame();
-    }
-
-    public void ChooseMight()
-    {
-        player.mightMultiplier += 0.1f;
+        UpgradeOption option = UpgradeRegistry.Get(id);
+        if (option != null && player != null)
+        {
+            option.Apply(player);
+            upgradeHistory.Push(option.DisplayName);
+        }
         UpdateUI();
         ResumeGame();
     }
 
     public void TriggerGameOver()
     {
-        Time.timeScale = 0f; // Freeze the action
+        Time.timeScale = 0f;
+        int wave = WaveManager.Instance != null ? WaveManager.Instance.CurrentWave : 0;
+        HighScoreManager.RecordRun(currentLevel, wave);
+        PopulateEndGameText(gameOverScoreText, wave);
         gameOverPanel.SetActive(true);
-      
     }
 
     public void TriggerWin()
     {
         Time.timeScale = 0f;
+        int wave = WaveManager.Instance != null ? WaveManager.Instance.CurrentWave : 0;
+        HighScoreManager.RecordRun(currentLevel, wave);
+        PopulateEndGameText(gameWinScoreText, wave);
         gameWinPanel.SetActive(true);
-        
     }
-    // Existing Pause/Resume/ShowText logic goes here...
-    void PauseForMenu() { Time.timeScale = 0f; levelUpPanel.SetActive(true); Cursor.visible = true; }
-    void ResumeGame() { levelUpPanel.SetActive(false); Time.timeScale = 1f; }
-    void ShowText(string message, Color color) {
+
+    private void PopulateEndGameText(TextMeshProUGUI target, int wave)
+    {
+        if (target == null) return;
+        string history = upgradeHistory.Count == 0 ? "None" : string.Join(", ", upgradeHistory);
+        target.text =
+            $"Level: {currentLevel}   Wave: {wave}\n" +
+            $"Best Level: {HighScoreManager.HighestLevel}\n" +
+            $"Best Wave: {HighScoreManager.HighestWave}\n" +
+            $"Upgrades: {history}";
+    }
+
+    void PauseForMenu()
+    {
+        Time.timeScale = 0f;
+        levelUpPanel.SetActive(true);
+        Cursor.visible = true;
+    }
+
+    void ResumeGame()
+    {
+        levelUpPanel.SetActive(false);
+        Time.timeScale = 1f;
+    }
+
+    void ShowText(string message, Color color)
+    {
         if (textPrefab && player)
         {
-            
             GameObject go = Instantiate(textPrefab, player.transform.position + Vector3.up * 2, Quaternion.identity);
-            var tm = go.GetComponentInChildren<TextMeshProUGUI>();
-            tm.text = message;
-            tm.color = color;
+            TextMeshProUGUI tm = go.GetComponentInChildren<TextMeshProUGUI>();
+            if (tm != null)
+            {
+                tm.text = message;
+                tm.color = color;
+            }
         }
     }
 }
